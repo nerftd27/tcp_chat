@@ -5,6 +5,10 @@
 #include <cstdlib>
 #include <unistd.h> //close socket
 #include <vector>
+#include "json.hpp"
+
+using json = nlohmann::json;
+
 #define BUF_SIZE 1024
 
 int getListenSocket() {
@@ -39,19 +43,24 @@ int getListenSocket() {
 }
 
 
-void ProcessingMsg(int& sock) {
-	std::string ans="!!!";
-	std::string req;
-	char temp[BUF_SIZE];
+std::string ProcessingJson(int& sock) {
 
-	std::cout<<"start ProcessingMsg()\n";
-        //char ans[BUF_SIZE];
-	//char req[BUF_SIZE];
+	char temp[BUF_SIZE];
 	recv(sock,temp,BUF_SIZE, 0);
+	json j = json::parse(temp);
+	
+	std::string req=j.value("field2","oops");
 	std::cout<<"Recieved: "<<req<<std::endl;
+	return req;
+}
+
+
+void ProcessingMsg(int& sock) {
+	std::cout<<"start ProcessingMsg()\n";
+	std::string ans=ProcessingJson(sock);
+
 	std::vector<char> buf(ans.begin(), ans.end());
 	buf.push_back('\0');
-
 	send(sock,&buf[0],BUF_SIZE, 0);
 
 	std::cout<<"exit from ProcessingMsg()\n";

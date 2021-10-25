@@ -6,6 +6,8 @@
 #include <string>
 #include <unistd.h>	//close(socket)
 
+#include "json.hpp"
+
 int getConnectedSocket() {
 	int sock;
 		
@@ -34,9 +36,18 @@ int main() {
 	int sock;
 	int rc;
 	char buf[1024];
-	std::string msg;
-	std::cout<<"Input msg:\n";
-	std::cin>>msg;
+	//std::string msg;
+	//std::cout<<"Input msg:\n";
+	//std::cin>>msg;
+	
+	char msg[] = R"(
+    	{
+            "field1":"111",
+            "field2":"222"
+        }
+	)";
+
+	
 
 	sock=getConnectedSocket();
 	
@@ -46,7 +57,7 @@ int main() {
 	}
 	
 	
-	rc = send(sock,msg.c_str(),sizeof(msg.c_str()),0);
+	rc = send(sock,msg,sizeof(msg),0);
 	if (rc<=0) {
 		std::cout<<"cl.send() error";
 		return 1;
