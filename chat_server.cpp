@@ -6,6 +6,8 @@
 #include <unistd.h> //close socket
 #include <vector>
 #include "json.hpp"
+#include <fcntl.h> // fd_set
+#include <algorithm>
 
 using json = nlohmann::json;
 
@@ -64,6 +66,7 @@ void chat_server::getListenSocket() {
 	local.sin_port = htons(7500);
 	local.sin_addr.s_addr = htonl(INADDR_ANY);
 	
+
 	
 	result = bind( listener, (sockaddr*) &local, sizeof(local) );
 	if (result<0) {
@@ -81,57 +84,63 @@ void chat_server::getListenSocket() {
 
 
 void chat_server::Processing() {
-	//getting new socket
-	int sock = accept(listener, NULL, NULL);
-	if(sock < 0)
-        {
-		std::cout<<"server.accept() error";
-            	exit(3);
-        }
-	accepted_sockets.push_back(sock);
-
-
-	//processing each opened socket
-	for (auto i:accepted_sockets) {
-
-		recv(i,req,BUF_SIZE,0);
-		std::cout<<"Recieved msg :"<<req<<std::endl;
+	while(1) {
+		fd_set set1;			//set of non-blocking sockets
+		FD_ZERO	(&set1);		//clearing set1
+		FD_SET(listener, &set1);	//listen socket added to set1
 	
-		*ans='Z';
-		send(i,ans,BUF_SIZE, 0);
-	
-		std::cout<<"Sended msg:"<<ans<<std::endl;
+		for(auto i:accepted_sockets) {
+			FD_SET(i, &set1);	//adding all accepted sockets from vector to set1
+		}
+		
+		timeval timeout;		//for select()
+		timeout.tv_sec=15;
+		timeout.tv_usec=0;
+		
+		//awaiting clients sockets
+		int mx=listener;
+		if (accepted_sockets.size()) {
+			mx=std::max(listener,*std::max_element(accepted_sockets.begin(),accepted_sockets.end()));
+		}
+
+		//std::max(listener,*std::max_element(accepted_sockets.begin(),accepted_sockets.end())); //for select()
+		if (0 >= select (mx+1, &set1, NULL, NULL, &timeout)) {	//checking sockets in set1 which  need processing
+			std::cout<<"srv.select() error\n";
+			exit(3);
+		}
+		
+		//porcessing new client
+		if (FD_ISSET(listener, &set1)) {
+			
+			int sock=accept(listener, NULL, NULL);
+			if(sock<0) {
+				perror("srv.accept() error");
+				exit(3);
+			}
+			fcntl(sock, F_SETFL, O_NONBLOCK);
+			accepted_sockets.push_back(sock);
+		}
+		
+		//processing each socket in accepted_sockets
+		for (auto i=accepted_sockets.begin();i!=accepted_sockets.end();i++) {
+			if (FD_ISSET(*i,&set1)) {			//if current socket in set1 - its need to read it
+				int bytes_read=recv(*i,req, BUF_SIZE,0);
+				if (bytes_read<=0) {			//no more bytes to read, close socket
+					close(*i);
+					accepted_sockets.erase(i);
+					if (0==accepted_sockets.size()) break; //segfault
+				
+					continue;
+				}
+				send(*i,req, bytes_read,0);		//pesponse for client
+			}
+		}
 	}
-
-	
-
-	//free res
-	//close(*accepted_sockets.end());
-	//accepted_sockets.pop_back();
 }
-
-
-
-/*std::string ProcessingJson(int& sock) {
-
-	char temp[BUF_SIZE];
-	recv(sock,temp,BUF_SIZE, 0);
-	json j = json::parse(temp);
-	
-	std::string req=j.value("field2","oops");
-	std::cout<<"Recieved: "<<req<<std::endl;
-	return req;
-}*/
-
-
-
+		
 
 int main() {
 	chat_server srv1;
-	
-	while(1) {
-        	srv1.Processing();
-	
-    	}
+	srv1.Processing();
 	return 0;
 }

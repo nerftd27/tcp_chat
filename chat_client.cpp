@@ -90,7 +90,7 @@ chat_client::~chat_client() {
 
 
 void chat_client::sendRequest() {
-	int res = send(sock,req,BUF_SIZE,0);
+	int res = send(sock,req,1,0);
 	if (res<=0) {
 		std::cout<<"cl.send() error\n";
 	}
@@ -100,7 +100,7 @@ void chat_client::sendRequest() {
 }
 
 void chat_client::recieveAnswer() {
-	int res = recv(sock, ans, BUF_SIZE, 0 );
+	int res = recv(sock, ans, 1, 0 );
 	if ( res <= 0 )
 		std::cout<<"cl.recv() error\n";
 	else
