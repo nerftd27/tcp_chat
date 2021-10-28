@@ -29,11 +29,11 @@ class chat_server {
 	int listener;
 	std::vector<int> accepted_sockets;
 	std::vector<chat_session> sessions;
-	char req[BUF_SIZE];
-	char ans[BUF_SIZE];
-
-
+	char request[BUF_SIZE];
+	char response[BUF_SIZE];
+	int bytes_read;
 	void getListenSocket();
+	void broadcastSend();
 public:
 	chat_server();
 	~chat_server();
@@ -42,6 +42,7 @@ public:
 
 chat_server::chat_server() {
 	getListenSocket();
+	accepted_sockets.clear();
 }
 
 chat_server::~chat_server() {
@@ -51,6 +52,13 @@ chat_server::~chat_server() {
 	if (listener) close(listener);
 }
 
+void chat_server::broadcastSend() {
+	for (auto i:accepted_sockets) {
+		send(i,request,bytes_read,0);	
+		std::cout<<"sended to "<<i<<" data :"<<request<<std::endl;
+
+	}
+}
 
 void chat_server::getListenSocket() {
 	int result;
@@ -58,25 +66,25 @@ void chat_server::getListenSocket() {
 	
 	listener= socket(AF_INET, SOCK_STREAM, 0);
 	if (listener<0) {
-		std::cout<<"server.socket() error";
+		perror("server.socket() error");
 		std::exit(1);
 	}
 	
+	fcntl(listener, F_SETFL, O_NONBLOCK);
+		
 	local.sin_family = AF_INET;
 	local.sin_port = htons(7500);
 	local.sin_addr.s_addr = htonl(INADDR_ANY);
 	
-
-	
 	result = bind( listener, (sockaddr*) &local, sizeof(local) );
 	if (result<0) {
-		std::cout<<"server.bind() error";
+		perror("server.bind() error");
 		std::exit(1);
 	}
 		
 	result = listen(listener,5);
 	if (result) {
-		std::cout<<"server.listen() error";
+		perror("server.listen() error");
 		std::exit(1);
 	}
 
@@ -92,9 +100,10 @@ void chat_server::Processing() {
 		for(auto i:accepted_sockets) {
 			FD_SET(i, &set1);	//adding all accepted sockets from vector to set1
 		}
+				
 		
 		timeval timeout;		//for select()
-		timeout.tv_sec=15;
+		timeout.tv_sec=30;
 		timeout.tv_usec=0;
 		
 		//awaiting clients sockets
@@ -103,9 +112,8 @@ void chat_server::Processing() {
 			mx=std::max(listener,*std::max_element(accepted_sockets.begin(),accepted_sockets.end()));
 		}
 
-		//std::max(listener,*std::max_element(accepted_sockets.begin(),accepted_sockets.end())); //for select()
 		if (0 >= select (mx+1, &set1, NULL, NULL, &timeout)) {	//checking sockets in set1 which  need processing
-			std::cout<<"srv.select() error\n";
+			perror("srv.select() error\n");
 			exit(3);
 		}
 		
@@ -115,26 +123,35 @@ void chat_server::Processing() {
 			int sock=accept(listener, NULL, NULL);
 			if(sock<0) {
 				perror("srv.accept() error");
-				exit(3);
+				exit(4);
 			}
 			fcntl(sock, F_SETFL, O_NONBLOCK);
 			accepted_sockets.push_back(sock);
+			std::cout<<"new client:"<<sock<<std::endl;
 		}
 		
 		//processing each socket in accepted_sockets
+		
 		for (auto i=accepted_sockets.begin();i!=accepted_sockets.end();i++) {
 			if (FD_ISSET(*i,&set1)) {			//if current socket in set1 - its need to read it
-				int bytes_read=recv(*i,req, BUF_SIZE,0);
+				bytes_read=recv(*i,request,BUF_SIZE,0);
+				std::cout<<"recieved from "<<*i<<" data:"<<request<<std::endl;
 				if (bytes_read<=0) {			//no more bytes to read, close socket
 					close(*i);
+				//	auto iter_temp=i;
+					std::cout<<"closed connection client "<<*i<<std::endl; 
 					accepted_sockets.erase(i);
-					if (0==accepted_sockets.size()) break; //segfault
-				
-					continue;
+					break;				//not processing left iterations for() for dismiss segfault 
+					//if (0==accepted_sockets.size()) break; 
+					//continue;
 				}
-				send(*i,req, bytes_read,0);		//pesponse for client
+			
+			//	send(*i,request,bytes_read,0);		
+			//	std::cout<<"sended to "<<*i<<" data "<<request<<std::endl;
+				broadcastSend();
 			}
 		}
+		
 	}
 }
 		

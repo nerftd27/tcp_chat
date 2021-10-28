@@ -5,25 +5,78 @@
 #include <iostream> 
 #include <string>
 #include <unistd.h>	//close(socket)
-
+#include <fcntl.h>
+#include <stdio.h> 	//STDIN_FILENO
 #include "json.hpp"
-#define BUF_SIZE 20000
+#define BUF_SIZE 1024
 
 using json = nlohmann::json;
 
 class chat_client {
 	int unsigned id_msg;
 	int sock;
+	int bytes_read;
 	char req[BUF_SIZE];
 	char ans[BUF_SIZE];
+	std::string temp;
 public:
 	chat_client();
 	~chat_client();
+	void processing();
 	void sendRequest();
 	void recieveAnswer();
 	void assemblyRequest(int command=0);
 };
 
+
+void chat_client::processing() {
+	while (1) {
+		fd_set set1;
+		FD_ZERO(&set1);
+		FD_SET(sock,&set1);
+		timeval timeout;                //for select()
+                timeout.tv_sec=5;
+                timeout.tv_usec=0;
+		
+                while (0 < select (sock+1, &set1, NULL, NULL, &timeout)) { 
+        		if (FD_ISSET(sock,&set1)) {
+			
+					bytes_read=recv(sock,ans,BUF_SIZE,0);
+					if (bytes_read>0) std::cout<<"recieved from server:"<<ans<<std::endl;
+				
+			}               
+                }
+			
+		
+	
+		std::cin>>req;
+		if ('R'!=req[0]) {
+			send(sock,req,BUF_SIZE,0);
+			std::cout<<"sended to server:"<<req<<std::endl;
+		}
+		req[0]='R';
+	
+		
+		
+		
+		
+		
+		/*bytes_read=recv(sock,ans,BUF_SIZE,0);
+		if (bytes_read >= 0) std::cout<<"recieved from server:"<<ans<<std::endl;
+		bytes_read=-1;
+
+		std::cout<<"input msg:";
+		std::cin>>req;
+
+		if ('R'!=req[0]) {
+			req[0]='R';
+			send(sock,req,BUF_SIZE,0);
+			std::cout<<"sended to server:"<<req<<std::endl;
+			if ('q'==req[0]) break;
+		}*/
+		
+	}
+}
 void chat_client::assemblyRequest(int command) {
 	std::cout<<"command:"<<command<<std::endl;
 	std::string s;
@@ -65,12 +118,17 @@ void chat_client::assemblyRequest(int command) {
 
 chat_client::chat_client() {
 	id_msg=1;
+	req[0]='R';
+	req[1]='\0';
+	temp="!";
+
 	struct sockaddr_in peer;
 	sock = socket( AF_INET, SOCK_STREAM, 0 );
 	if (sock<0) {
 		std::cout<<"client.socket() error\n";
 		std::exit(-1);
 	}
+	
 
 	peer.sin_family = AF_INET;
 	peer.sin_port = htons( 7500 );
@@ -78,10 +136,12 @@ chat_client::chat_client() {
 
 	int res = connect(sock,(struct sockaddr*) &peer,sizeof(peer));
 	if ( res ) {
-		std::cout<<"client.connect() error\n";
+		perror("client.connect() error\n");
 		std::exit(-2);
 	}
 	
+	fcntl(sock,F_SETFL, O_NONBLOCK);
+	fcntl(STDIN_FILENO,F_SETFL, O_NONBLOCK);
 }
 
 chat_client::~chat_client() {
@@ -110,7 +170,8 @@ void chat_client::recieveAnswer() {
 
 int main() {
 	chat_client client1;
-	for(int command=0;;) {
+	client1.processing();
+	/*for(int command=0;;) {
 		std::cout<<"input command:";
 		std::cin>>command;
 		if (-1==command) break;
@@ -119,6 +180,6 @@ int main() {
 		client1.assemblyRequest(command);
 		client1.sendRequest();
 		client1.recieveAnswer();
-	}
+	}*/
 	return 0;;
 }
