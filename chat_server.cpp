@@ -1,6 +1,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+
 #include <iostream>
 #include <cstdlib>
 #include <unistd.h> //close socket
@@ -8,57 +9,28 @@
 #include "json.hpp"
 #include <fcntl.h> // fd_set
 #include <algorithm>
+#include "agg_client.h"
 
 using json = nlohmann::json;
-
-const int BUF_SIZE=1024;
-const int MAX_USERS=5;
-
-enum commands {hello=0, login=1, message=2, ping=3, logout=4,
-                hello_reply=5, login_reply=6, message_reply=7, ping_reply=8, logout_reply=9,
-                chat_exit=10};
-
-struct chat_user {
-	std::string login;
-	std::string password;
-	int authorized;
-};
-
-void initUser(chat_user& usr,int k) {
-	usr.authorized=0;
-	usr.login="user"+std::to_string(k);
-	usr.password=std::to_string(k*111);
-	std::cout<<"init "<<usr.login<<" pwd:"<<usr.password<<std::endl;
-}
-
-int authorizeUser(chat_user* dbUsers, chat_user* guest) {
-	for (;dbUsers;dbUsers++) 
-		if ((dbUsers->login==guest->login) and (dbUsers->password==guest->password) and (!dbUsers->authorized)) {
-			dbUsers->authorized=1;
-			return 1 ;
-		}
-	return 0;
-}
-
-struct client {
-	long UUID_session;
-	chat_user user;
-	int sock;
-	unsigned int id_msg;
-};
 	
 class chat_server {
 	int listener;
-	unsigned int id_cl_msg;
-	std::vector<client> accepted_sockets;
+	std::vector<agg_client> accepted_sockets;
+	
 	char request[BUF_SIZE];
 	char response[BUF_SIZE];
+	
 	int bytes_read;
-	int broadcast;				//triger for broadcast sending responses
-	void getListenSocket();
-	void broadcastSend();
-	void parseRequest(std::vector<client>::iterator cl);
-	void sendResponse();
+	int broadcast;				//triger for broadcast sending
+	int id_cl_msg;
+	std::vector<chat_user> dbUsers;		//storage here references logins and passwords 
+	std::string msg_body;			//for broadcast sending
+	std::string sender_login;		//for broadcast sending
+
+	int getListenSocket();
+	commands parseRequest(std::vector<agg_client>::iterator it);
+	int sendResponse(std::vector<agg_client>::iterator it);
+	int checkUUID(long uuid_replied);	//checking authorization with replied uuid
 public:
 	chat_server();
 	~chat_server();
@@ -68,6 +40,9 @@ public:
 chat_server::chat_server() {
 	getListenSocket();
 	accepted_sockets.clear();
+
+	for (int i=0;i<MAX_USERS;i++)
+		dbUsers.push_back(initUser(i+1));
 }
 
 chat_server::~chat_server() {
@@ -77,106 +52,117 @@ chat_server::~chat_server() {
 	if (listener) close(listener);
 }
 
-void chat_server::parseRequest(std::vector<client>::iterator cl) {
+commands chat_server::parseRequest(std::vector<agg_client>::iterator it) {
 	broadcast=0;
 	json j_request=json::parse(request);
       	json j_response;
-      	j_response["id"]=cl->id_msg;	
+      	j_response["id"]=it->id_msg;	
 	
 	id_cl_msg=j_request.value("id",0);
         int cmnd=j_request.value("command",0);
-       // std::string s="id_cl_msg:"+std::to_string(id_cl_msg)+" command:"+ std::to_string(cmnd);
+
         switch (cmnd) {
 		case (commands::hello): {
 			j_response["command"]=commands::hello_reply;
 			j_response["auth_method"]="plain_text";
-			break;
-		}
+		} break;
 		case (commands::login): {
 			j_response["command"]=commands::login_reply;
-			chat_user us;
-			us.login=j_request.value("login","oops");
-			us.password=j_request.value("password","oops");
-			break;
-		}
+			chat_user temp;
+			temp.login=j_request.value("login","oops");
+			temp.password=j_request.value("password","oops");
+			if (authorizeUser(dbUsers.begin(),&temp)) {
+				it->user=temp;
+				it->UUID_session=rand();	
+				j_response["status"]=1;
+				j_response["session"]=it->UUID_session;
+			} else {
+				j_response["status"]=0;
+				j_response["message"]="authorization failed! dont know why...\n";
+			}				
+		} break;
+		case (commands::message): {
+			msg_body=j_request.value("body","oops");
+			long uuid_replied=j_request.value("session",0);
+			j_response["command"]=commands::message_reply;
+			
+//			std::cout<<"\nUUID:"<<it->UUID_session;					//for debug
+//			std::cout<<"\nuuid_replied:"<<uuid_replied<<std::endl;
+			
+			if ((it->UUID_session)and(it->UUID_session==uuid_replied)) {		//checking authorization with replied uuid session
+				j_response["status"]=1;
+				j_response["client_id"]=id_cl_msg;
+				sender_login=it->user.login;
+				broadcast=1;			//next sendRequest will be broadcast	
+			} else {
+				j_response["status"]=0;
+				j_response["message"]="sending message to chat failed! problem with authorization...\n";
+			}		 									  					  				  
+		} break;
+		/*case (commands::message_reply): {		//no need reponse, its confirmation from clients
+			std::cout<<"confirmation recieved from "<<it->user.login<<std::endl;	//implement here needed logic				       
+			return static_cast<commands>(cmnd);	
+		}*/
+		case (commands::ping): {
+			j_response["command"]=commands::ping_reply;
+			long uuid_replied=j_request.value("session",0);
+			if ((it->UUID_session)and(it->UUID_session==uuid_replied)) {		//checking authorization with replied uuid session
+				j_response["status"]=1;
+	
+			} else {
+				j_response["status"]=0;
+				j_response["message"]="ping failed! problem with authorization...\n";
+			}		
+		} break;
+		case (commands::logout): {
+                        j_response["command"]=commands::logout_reply;
+                        //long uuid_replied=j_request.value("session",0);	//not used, status always return ok
+			j_response["status"]=1;
+			//delete almost all data (except socket).Also unmarking flag authorized in dbUsers 
+			//We left only 1 field - its  socket in *it, and it will be erased when bytes_read<0 in processing()
+			clearAgg_client(dbUsers.begin(),*it);			
+		} break;
+
 	}	
-	
-	
 	
 	std::string s=j_response.dump();
         std::copy(s.begin(),s.end(),response);
         response[s.size()]='\0';
-/*
-                case (commands::hello_): {
-
-                        s+=" auth_method:"+j.value("auth_method","oops");
-                        break;
-                }
-                case (commands::login_reply): {
-                        int status=j.value("status",0);
-                        if (status) {
-                                uuid_session=j.value("session",0);
-                                s+=" ok. UUID_session="+std::to_string(uuid_session);
-                        } else {
-                                s+=" failed. "+j.value("message","oops");
-                        }
-                        break;
-                }
-                case (commands::message_reply): {
-                        int status=j.value("status",0);
-                        if (status) {
-                                int id_cl_msg=j.value("client_id",0);
-                                s+=" ok. id_cl_msg="+std::to_string(id_cl_msg);
-                        } else {
-                                s+=" failed. "+j.value("message","oops");
-                        }
-                        break;
-                }
-                case (commands::message): {             //server sended us some msg from other user
-                        s+=" usr "+j.value("sender_login","oops")+" msg:"+j.value("body","oops");       //+UUID_session
-                        //todo - add responce to server about confirming recieving
-                        break;
-                }
-                case (commands::ping_reply): {
-                        int status=j.value("status",0);
-                        if (status) {
-                                s+=" ok";
-                        } else {
-                                s+=" failed. "+j.value("message","oops");
-                        }
-                        break;
-                }
-                case (commands::logout_reply): {
-                        int status=j.value("status",0);
-                        if (status) {
-                                s+=" ok";
-                        }
-
-                        break;
-                }
-
-
-
-        }
-
-*/
-
-
+	return static_cast<commands> (cmnd);
 }
 
 
-void chat_server::sendResponse() {
-}
-
-void chat_server::broadcastSend() {
-	for (auto i:accepted_sockets) {
-		send(i.sock,response,sizeof(response),0);	
-		std::cout<<"sended to "<<i.sock<<" data :"<<response<<std::endl;
-
+int chat_server::sendResponse(std::vector<agg_client>::iterator cl) {
+	int r =	send(cl->sock,response,sizeof(response),0);	
+	std::cout<<"sended to "<<cl->sock<<" data :"<<response<<std::endl;
+	
+	//if we have msg to chat, need to assebmly new json and send it to all users
+	if (broadcast) {		
+		json j;
+		for (auto i:accepted_sockets) {
+			if ((i.UUID_session)and(i.user.login!=sender_login)) {		//send msg only authorized session, except sender user
+				j["id"]=i.id_msg;
+				j["command"]=commands::message;
+				j["body"]=msg_body;
+				j["sender_login"]=sender_login;
+			
+				std::string s=j.dump();
+        			std::copy(s.begin(),s.end(),response);
+        			response[s.size()]='\0';
+				
+				r = send(i.sock,response,sizeof(response),0);
+				std::cout<<"BROADCAST sended to "<<i.sock<<" data :"<<response<<std::endl;
+				i.id_msg++;		
+			}						
+		}
+	broadcast=0;
 	}
+	cl->id_msg++;	
+	return r;
+
 }
 
-void chat_server::getListenSocket() {
+int chat_server::getListenSocket() {
 	int result;
 	sockaddr_in local;
 	
@@ -203,7 +189,7 @@ void chat_server::getListenSocket() {
 		perror("server.listen() error");
 		std::exit(1);
 	}
-
+	return 0;
 }
 
 
@@ -212,14 +198,14 @@ void chat_server::Processing() {
 		fd_set set1;			//set of non-blocking sockets
 		FD_ZERO	(&set1);		//clearing set1
 		FD_SET(listener, &set1);	//listen socket added to set1
-	
+		
 		for(auto i:accepted_sockets) {
 			FD_SET(i.sock, &set1);	//adding all accepted sockets from vector to set1
 		}
 				
 		
 		timeval timeout;	
-		timeout.tv_sec=30;
+		timeout.tv_sec=180;
 		timeout.tv_usec=0;
 		
 		//awaiting clients sockets
@@ -231,7 +217,6 @@ void chat_server::Processing() {
 				if (max_sock<i.sock) 
 					max_sock=i.sock;
 			mx=std::max(listener, max_sock);
-			//mx=std::max(listener,*std::max_element(accepted_sockets.begin(),accepted_sockets.end()));
 		}
 
 		if (0 >= select (mx+1, &set1, NULL, NULL, &timeout)) {	//checking sockets in set1 which  need processing
@@ -239,7 +224,7 @@ void chat_server::Processing() {
 			exit(3);
 		}
 		
-		//porcessing new client
+		//porcessing new client socket
 		if (FD_ISSET(listener, &set1)) {
 			
 			int sock1=accept(listener, NULL, NULL);
@@ -248,7 +233,8 @@ void chat_server::Processing() {
 				exit(4);
 			}
 			fcntl(sock1, F_SETFL, O_NONBLOCK);
-			accepted_sockets.push_back({0,{0,0,0},sock1,0});	//blanked only 1 field - sock
+			
+			accepted_sockets.push_back(agg_client(sock1));	
 			std::cout<<"new socket client:"<<sock1<<std::endl;
 		}
 		
@@ -256,18 +242,18 @@ void chat_server::Processing() {
 		for (auto i=accepted_sockets.begin();i!=accepted_sockets.end();i++) {
 			if (FD_ISSET(i->sock,&set1)) {			//if current socket in set1 - its need to read it
 				bytes_read=recv(i->sock,request,BUF_SIZE,0);
-				parseRequest(i);
-				std::cout<<"recieved from "<<i->sock<<" data:"<<request<<std::endl;
 				if (bytes_read<=0) {			//no more bytes to read, close socket
 					close(i->sock);
-				
-					std::cout<<"connection closed by client "<<i->sock<<std::endl; 
+					std::cout<<"------\nconnection closed by client "<<i->sock<<std::endl; 
 					accepted_sockets.erase(i);	
-					break;				//not processing left iterations for except segfault 
-					
+					break;				//not processing left iterations for except segfault 	
+				} else {
+					 std::cout<<"------\nrecieved from "<<i->sock<<" data:"<<request<<std::endl;
 				}
-									
-			//	broadcastSend();
+				
+				parseRequest(i);
+				sendResponse(i);				
+				*request=0;
 			}
 		}
 		
@@ -277,9 +263,7 @@ void chat_server::Processing() {
 
 int main() {
 	chat_server srv1;
-	chat_user users[MAX_USERS];
-	for (int i=1;i<=MAX_USERS;i++)
-		initUser(users[i],i);
+
 	srv1.Processing();
 	return 0;
 }

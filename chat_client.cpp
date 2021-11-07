@@ -7,32 +7,32 @@
 #include <unistd.h>	//close(socket)
 #include <stdio.h> 	//STDIN_FILENO
 #include "json.hpp"
-#define BUF_SIZE 1024
+#include "agg_client.h"
+#include <fstream>
+#include <cstdlib>
+#include <csignal>
+
+
 
 using json = nlohmann::json;
+const char* SERVER_IP="127.0.0.1";
+const int SERVER_PORT=7500;
 
-enum commands {hello=0, login=1, message=2, ping=3, logout=4,
-		hello_reply=5, login_reply=6, message_reply=7, ping_reply=8, logout_reply=9,
-		chat_exit=10};
-
-struct chat_user { 
-	std::string login; 
-	std::string password; 
-};
 
 class chat_client {
-	int unsigned id_msg;
+	agg_client cl;
 	int unsigned id_srv_msg;
-	long uuid_session;
-	int sock;
-	chat_user usr;
-	
+	std::fstream buf_forks;			//for transmiting data between forks (UUID_session)
+	std::string buf_filename;
+
+
 	char request[BUF_SIZE];
 	char response[BUF_SIZE];
-	
+	std::string msg_body;
+
+	commands getCommand();
 	int assemblyRequest(int command=0);
 	void sendRequest();
-	int recieveResponse();
 	std::string parseResponse();
 public:
 	chat_client();
@@ -40,46 +40,50 @@ public:
 	void processing();
 };
 
+
 int chat_client::assemblyRequest(int command) {
 	std::string s;
 	json j;
-	switch (command) {			//fixme - implement separate funcs according commands with array of pointers to this funcs
+	switch (command) {			//todo - implement separate funcs according commands with array of pointers to this funcs
 		case (commands::hello): {
-			j["id"]=id_msg;
+			j["id"]=cl.id_msg;
 			j["command"]=commands::hello;
 			break;
 		}
 		case (commands::login): {
-			j["id"]=id_msg;
+			j["id"]=cl.id_msg;
 			j["command"]=commands::login;
-			j["login"]=usr.login;
-			j["password"]=usr.password;
+			j["login"]=cl.user.login;
+			j["password"]=cl.user.password;
 			break;
 		}
 		case (commands::message): {
-			j["id"]=id_msg;
+			buf_forks.seekg(0,std::ios::beg);
+			buf_forks>>cl.UUID_session;	  
+
+			j["id"]=cl.id_msg;
 			j["command"]=commands::message;
-			j["body"]="body_msg";
-			j["session"]=uuid_session;
+			j["body"]=msg_body;
+			j["session"]=cl.UUID_session;
 			break;
 		}
 		case (commands::ping): {
-			j["id"]=id_msg;
+			j["id"]=cl.id_msg;
 			j["command"]=commands::ping;
-			j["session"]=uuid_session;
+			j["session"]=cl.UUID_session;
 			break;
 		}
 		case (commands::logout): {
-			j["id"]=id_msg;
+			j["id"]=cl.id_msg;
 			j["command"]=commands::logout;
-			j["session"]=uuid_session;
+			j["session"]=cl.UUID_session;
 			break;
 		}
-		case (commands::message_reply): { 	//responce to server to confirming recieving command::message. Not enable to user
-			j["id"]=id_msg;
+		case (commands::message_reply): { 	//responce to server to confirming recieving command::message. Service command, not for user
+			j["id"]=cl.id_msg;
 			j["command"]=commands::message_reply;
 			j["status"]=1;
-			j["client_id"]=id_msg;		//?
+			j["client_id"]=id_srv_msg;	
 			break;
 		}
 
@@ -106,8 +110,11 @@ std::string chat_client::parseResponse() {
 		case (commands::login_reply): {
 			int status=j.value("status",0);
 			if (status) {
-				uuid_session=j.value("session",0);
-				s+=" ok. UUID_session="+std::to_string(uuid_session);
+				cl.UUID_session=j.value("session",0);	//in next iteartion it will be new fork, with zero value UUID_session, so we save it to filestream
+				buf_forks<<cl.UUID_session;		//for transfering recieved uuid to main fork (at func assemblyRequest(), command==message).
+				buf_forks.flush();			//dont forget flush filestream, otherwise assemblyRequest() cant gets uuid
+					
+				s+=" ok. UUID_session="+std::to_string(cl.UUID_session);
 			} else {
 				s+=" failed. "+j.value("message","oops");
 			}
@@ -123,9 +130,11 @@ std::string chat_client::parseResponse() {
 			}
 			break;
 		}
-		case (commands::message): {		//server sended us some msg from other user
-			s+=" usr "+j.value("sender_login","oops")+" msg:"+j.value("body","oops");	//+UUID_session
+		case (commands::message): {		//server sended us some msg from other users
+			s+=" "+j.value("sender_login","oops")+": "+j.value("body","oops");	//+UUID_session
 			//todo - add responce to server about confirming recieving
+			//assemblyRequest(commands::message_reply);
+			//sendRequest();
 			break;
 		}
 		case (commands::ping_reply): {
@@ -141,114 +150,161 @@ std::string chat_client::parseResponse() {
 			int status=j.value("status",0);
 			if (status) {
 				s+=" ok";
+			//	close(cl.sock);		//commented for fork can display logout_reply message. fork termninate in main process.
+			//	exit(0);
+
 			}
-	
+			
 			break;
 		}
-
-
 	
 	}
-	
-	
-	
-	
-	std::cout<<s<<std::endl;
 	return s;
 }
 
 void chat_client::processing() {
 	int command=0;
-	while(1) {	
-		//fork for real-time displaying messages from server.
-		//here we obtain raw messages, parsing it, and execute needed actions
-		switch (fork()) {
+	pid_t child_fork;
+	
+	//fork for real-time displaying messages from server.
+	//in fork case  we obtain raw messages, parsing it, and execute needed actions
+	switch (child_fork=fork()) {
 		case -1:
 			perror("fork error");
 			break;
-		case 0:
-			while(1) {
-				int bytes_read=recieveResponse();//recv(sock,response,BUF_SIZE,0);
+		case 0: {	//fork processing
+			int bytes_read=1;
+						
+			while (1) {
+				bytes_read=recv(cl.sock,response,BUF_SIZE,0);
 				if (bytes_read<=0) break;
-				parseResponse();		
-				//std out server response
+				std::cout<<parseResponse()<<std::endl;	
 			}
+			close(cl.sock);
+					
 			exit(0);
-		default:
-			break;
-		}
-	
-		//sending message
-		//	0 - HELLO
-		//	1 - login
-		//	2 <msg> - message
-		//	3 - ping
-		//	4 - logout
-		//      10 - exit
-		std::cin>>command;		//fixme - no check input
-		if (commands::chat_exit==command)  exit(0);
-		assemblyRequest(command);
-		command=255;			//reset command
-		sendRequest();
-		}
+		}				
+		default:{	//primary processing	
+			while (1) {
+				command=getCommand();		
+				if (commands::message==command) {
+					std::cout<<"input message:\n";
+					std::getline(std::cin,msg_body);
+					std::cout<<std::endl;			
+				}
+				assemblyRequest(command);
+				sendRequest();	
+				
+				//quit processing
+				if (commands::logout==command) {
+					sleep(1);				//waiting for fork process logout_reply. but why?
+					if (kill(child_fork, SIGKILL)) {	//fork, u ll come with me!
+						perror("cant terminate child fork");
+						exit(1);
+					}
+					std::cout<<"exit\n";								
+					break;
+					
+				}					
+				command=255;			//just reseting for next iteration
+			}
+		} break;					
+	}	
 }
-
 chat_client::chat_client() {
-	id_msg=1;
-	usr.login="user1";
-	usr.password="111";
-	uuid_session=999;
+	cl.id_msg=1;
+	cl.user.login="user1";
+	cl.user.password="111";
+	cl.UUID_session=0;
 
 
 	struct sockaddr_in peer;
-	sock = socket( AF_INET, SOCK_STREAM, 0 );
-	if (sock<0) {
+	cl.sock = socket( AF_INET, SOCK_STREAM, 0 );
+	if (cl.sock<0) {
 		perror("client.socket() error");
 		std::exit(-1);
 	}
 	
 
 	peer.sin_family = AF_INET;
-	peer.sin_port = htons( 7500 );
-	peer.sin_addr.s_addr = inet_addr( "127.0.0.1" );
+	peer.sin_port = htons(SERVER_PORT);
+	peer.sin_addr.s_addr = inet_addr(SERVER_IP);
 
-	int res = connect(sock,(struct sockaddr*) &peer,sizeof(peer));
+	int res = connect(cl.sock,(struct sockaddr*) &peer,sizeof(peer));
 	if ( res ) {
 		perror("client.connect() error\n");
 		std::exit(-2);
 	}
+	
+	inputUser(&cl.user); 
+	
 
+	//for transmiting data between forks
+	buf_filename = "buf_forks_"+std::to_string(getpid())+".buf";	//make differents filenames for local execution multiply clients
+	buf_forks.open(buf_filename,std::ios::out|std::ios::in|std::ios::trunc);	
+	if (!buf_forks.is_open()) {
+		perror("cant initialize buffer file");
+		exit(1);
+	}
 }
 
-chat_client::~chat_client() {
-	if (sock) close(sock);
+chat_client::~chat_client() {	
+	buf_forks.close();
+	std::remove(buf_filename.c_str());
+	if (cl.sock) close(cl.sock);
 }
+
+void printStart() {
+	std::cout<<"simple tcp-chat by Nerftd client-version\n"<<
+		"commands:\n"<<
+		"0 - Hello\n"<<
+		"1 - Login\n"<<
+		"2 - Message\n"<<
+		"3 - Ping\n"<<
+		"4 - Logout\n"<<
+		"Server - "<<SERVER_IP<<":"<<SERVER_PORT<<std::endl;
+}
+
+commands chat_client::getCommand()
+{
+    while (1)
+    {
+        char cmd;
+        std::cin>>cmd;
+        std::cin.ignore(32767,'\n');	//if input too much clear buf
+ 	switch (cmd) {
+		case('0'):
+			return commands::hello;
+		case('1'):
+			return commands::login;
+		case('2'):
+			return commands::message;
+		case('3'):
+			return commands::ping;
+		case('4'):
+			return commands::logout;
+		default:{
+			std::cout<<"invalid input,try again\n";
+			break;
+		}
+	}
+    }		   
+}
+
 
 
 void chat_client::sendRequest() {
-	int res = send(sock,request,sizeof(request),0);
+	int res = send(cl.sock,request,sizeof(request),0);
 	if (res<=0) {
 		perror("client.send() error");
 	}
-	std::cout<<"request !"<<request<<"! sended\n";	
-
-	id_msg++;
-}
-
-int chat_client::recieveResponse() {
-	int res = recv(sock, response, BUF_SIZE, 0 );
-	if ( res <= 0 )
-		perror("client.recv() error");
-	return res;
-	
-	/*else
-		std::cout<<"responce!"<<response<<"!  recieved\n ";*/
+	cl.id_msg++;
 }
 
 
 int main() {
+	printStart();
 	chat_client client1;
 	client1.processing();
-
 	return 0;;
 }
